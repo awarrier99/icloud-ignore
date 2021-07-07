@@ -27,7 +27,8 @@ class ICloudIgnoreUtility:
         self.last_ignored_filename = f
 
     def should_ignore(self, d: str) -> bool:
-        return any(map(lambda s: s in d, self.ignore_list))
+        path_segments = d.split('/')
+        return any(map(lambda s: s in self.ignore_list, path_segments))
 
     def is_ignored(self, path: str) -> bool:
         return '.nosync' in path or os.path.islink(path)
