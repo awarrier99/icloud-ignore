@@ -89,7 +89,8 @@ class ICloudIgnoreUtility:
         self.log('Performing initial file system check')
         self.ignore_matching(None)
 
-        event_handler = PatternMatchingEventHandler(['*'], case_sensitive=True)
+        patterns = list(map(lambda i: '**/' + i, self.ignore_list))
+        event_handler = PatternMatchingEventHandler(patterns, case_sensitive=True)
         event_handler.on_created = event_handler.on_modified = event_handler.on_moved = self.ignore_matching
 
         watcher = Observer()
