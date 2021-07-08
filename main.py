@@ -1,10 +1,11 @@
 import os
 import sys
 import time
+import queue
 
 from datetime import datetime
 from watchdog.observers import Observer
-from watchdog.events import PatternMatchingEventHandler
+from watchdog.events import RegexMatchingEventHandler
 
 
 class ICloudIgnoreUtility:
@@ -14,57 +15,64 @@ class ICloudIgnoreUtility:
         self.last_ignored_timestamp = 0
         self.last_ignored_filename = None
         self.running = False
-        self.stale = False
-        self.cached_event = None
+        self.event_queue = queue.Queue()
 
     def log(self, message: str):
         print('[{}] {}'.format(datetime.now().strftime('%m-%d-%Y %I:%M:%S %p'), message), flush=True)
 
-    def ignore(self, f: str):
-        os.rename(f, f'{f}.nosync')
-        os.symlink(f'{f}.nosync', f)
-        self.last_ignored_timestamp = time.monotonic()
-        self.last_ignored_filename = f
+    def ignore(self, path: str):
+        os.rename(path, f'{path}.nosync')
+        os.symlink(f'{path}.nosync', path)
 
-    def should_ignore(self, d: str) -> bool:
-        path_segments = d.split('/')
+    def should_ignore(self, path: str) -> bool:
+        path_segments = path.split('/')
         return any(map(lambda s: s in self.ignore_list, path_segments))
 
     def is_ignored(self, path: str) -> bool:
         return '.nosync' in path or os.path.islink(path)
 
-    def is_self_generated_event(self, event) -> bool:
-        src = event.src_path
-        dst = getattr(event, 'dst_path', None)
+    def process_event(self, event):
+        self.log(f'File system change detected: {event}')
+        
+        if self.running:
+            self.log('File system walk already in progress')
+            self.log('Queueing event')
+            self.event_queue.put(event)
+            return
 
-        if abs(time.monotonic() - self.last_ignored_timestamp) < 1:
-            src_match = self.last_ignored_filename in src or src in self.last_ignored_filename
-            dst_match = dst and (self.last_ignored_filename in dst or dst in self.last_ignored_filename)
-            if src_match or dst_match:
-                return True
+        self.ignore_event_target(event)
+        
+    def ignore_event_target(self, event):
+        target = event.src_path
 
-        return False
+        if abs(time.time() - os.stat(target).st_mtime) < 10:
+            self.log(f'Waiting for {target} to be stale for at least 10 seconds')
 
-    def ignore_matching(self, event):
-        if event:
-            self.log(f'File system change detected: {event}')
-            if self.running:
-                self.log('File system walk already in progress')
-                self.log(f'Marking as stale and delaying event: {event}')
-                self.stale = True
-                self.cached_event = event
-                return
+            while abs(time.time() - os.stat(target).st_mtime) < 10:
+                time.sleep(1)
 
-            if self.is_self_generated_event(event):
-                self.log(f'Ignoring self-generated event: {event}')
-                return
+        self.log(f'Handling event: {event}')
 
+        parent = os.path.abspath(os.path.join(target, os.pardir))
+        if self.should_ignore(parent):
+            self.log(f'Skipping {target} as ancestor directory is ignored')
+            return
+
+        if self.is_ignored(target):
+            self.log(f'Skipping {target} as it is already ignored')
+            return
+        
+        if self.should_ignore(target):
+            self.log(f'Ignoring {target}')
+            self.ignore(target)
+
+    def ignore_matching(self):
         self.running = True
         self.log(f'Walking file system')
 
         for dir_path, dirs, _ in os.walk(self.BASE_DIR):
             if self.should_ignore(dir_path):
-                self.log(f'Skipping {dir_path} walk as top-level directory is or will be ignored')
+                self.log(f'Skipping {dir_path} walk as ancestor directory is ignored')
                 continue
 
             self.log(f'Walking {dir_path}')
@@ -72,31 +80,36 @@ class ICloudIgnoreUtility:
             for d in dirs:
                 path = os.path.join(dir_path, d)
                 self.log(f'Testing directory {path}')
-                if not self.is_ignored(path) and self.should_ignore(d):
+                if self.is_ignored(path):
+                    self.log(f'Skipping {path} as it is already ignored')
+                    continue
+
+                if self.should_ignore(d):
                     self.log(f'Ignoring {path}')
                     self.ignore(path)
 
         self.running = False
-
-        if self.stale:
-            self.log('File system is stale')
-            self.log(f'Firing last delayed event: {self.cached_event}')
-            self.stale = False
-            self.ignore_matching(self.cached_event)
+        if not self.event_queue.empty():
+            self.log('Dequeuing and handling events')
+            
+            while not self.event_queue.empty():
+                self.ignore_event_target(self.event_queue.get())
 
     def watch(self):
         self.log(f'File system: {self.BASE_DIR}')
-        self.log('Performing initial file system check')
-        self.ignore_matching(None)
 
-        patterns = list(map(lambda i: '**/' + i, self.ignore_list))
-        event_handler = PatternMatchingEventHandler(patterns, case_sensitive=True)
-        event_handler.on_created = event_handler.on_modified = event_handler.on_moved = self.ignore_matching
+        regexes = list(map(lambda i: f'^.*{i}$', self.ignore_list))
+        ignore_regexes = list(map(lambda i: f'^.*{i}.+$', self.ignore_list))
+        event_handler = RegexMatchingEventHandler(regexes=regexes, ignore_regexes=ignore_regexes)
+        event_handler.on_created = self.process_event
 
         watcher = Observer()
         watcher.schedule(event_handler, self.BASE_DIR, recursive=True)
         watcher.start()
         self.log('Watching file system')
+
+        self.log('Performing initial file system check')
+        self.ignore_matching()
 
         try:
             while True:
@@ -108,5 +121,5 @@ class ICloudIgnoreUtility:
             watcher.join()
 
 if __name__ == '__main__':
-    watcher =  ICloudIgnoreUtility(sys.argv[1])
+    watcher = ICloudIgnoreUtility(sys.argv[1])
     watcher.watch()

@@ -2,3 +2,4 @@
 venv/
 test/
 *.log
+nohup.out
