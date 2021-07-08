@@ -108,5 +108,5 @@ class ICloudIgnoreUtility:
             watcher.join()
 
 if __name__ == '__main__':
-    watcher =  ICloudIgnoreUtility(os.path.abspath(os.path.expandvars(os.path.expanduser(sys.argv[1]))))
+    watcher =  ICloudIgnoreUtility(sys.argv[1])
     watcher.watch()
